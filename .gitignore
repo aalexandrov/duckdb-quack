@@ -1,4 +1,5 @@
 build
+.cache
 .idea
 .vscode
 cmake-build-debug
@@ -7,5 +8,7 @@ duckdb_unittest_tempdir/
 testext
 test/python/__pycache__/
 .Rhistory
+scratchpad/metadata.ducklake
+scratchpad/data/
 scripts/data/
 duckdb_benchmark_data/
