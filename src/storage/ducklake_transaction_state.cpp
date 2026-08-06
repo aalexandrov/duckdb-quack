@@ -1697,7 +1697,10 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 	SnapshotAndStats commit_stats_snapshot;
 	auto &commit_snapshot = commit_stats_snapshot.snapshot;
 	optional_ptr<vector<DuckLakeGlobalStatsInfo>> stats;
+	auto commit_start_time = std::chrono::steady_clock::now();
+	idx_t attempt_count = 0;
 	for (idx_t i = 0; i < retry_config.max_retry_count + 1; i++) {
+		attempt_count = i;
 		bool can_retry;
 		auto attempt_changes = transaction_changes;
 		try {
@@ -1763,6 +1766,7 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 			double random_multiplier = (random.NextRandom() + 1.0) / 2.0;
 			uint64_t sleep_amount = (uint64_t)((double)retry_config.retry_wait_ms * random_multiplier *
 			                                   pow(retry_config.retry_backoff, static_cast<double>(i)));
+			context.log_retry(i, sleep_amount, error.Message());
 			std::this_thread::sleep_for(std::chrono::milliseconds(sleep_amount));
 #endif
 
@@ -1773,6 +1777,10 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 	}
 	// If we got here, this snapshot was successful
 	context.set_committed_snapshot_id(commit_snapshot.snapshot_id);
+	auto commit_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+	                                                                               commit_start_time)
+	                             .count();
+	context.log_commit_complete(attempt_count, commit_elapsed_ms);
 }
 
 } // namespace duckdb

@@ -14,9 +14,22 @@
 #include "duckdb/common/index_vector.hpp"
 #include "storage/ducklake_stats.hpp"
 #include "storage/ducklake_metadata_info.hpp"
+#include "storage/ducklake_insert.hpp"
+#include <chrono>
 
 namespace duckdb {
 class DuckLakeTableEntry;
+
+//! Global sink state for DuckLakeCompaction - adds a start timestamp on top of DuckLakeInsertGlobalState so
+//! Finalize() can log how long the actual per-group file read+write took (from the first Sink() call to Finalize).
+class DuckLakeCompactionSinkState : public DuckLakeInsertGlobalState {
+public:
+	explicit DuckLakeCompactionSinkState(DuckLakeTableEntry &table)
+	    : DuckLakeInsertGlobalState(table), start_time(std::chrono::steady_clock::now()) {
+	}
+
+	std::chrono::steady_clock::time_point start_time;
+};
 
 class DuckLakeCompaction : public PhysicalOperator {
 public:

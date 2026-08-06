@@ -15,6 +15,10 @@
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
 #include "fmt/format.h"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/logging/logger.hpp"
+#include "storage/ducklake_log_type.hpp"
+#include <chrono>
 
 #include "functions/ducklake_compaction_functions.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"
@@ -126,11 +130,11 @@ SourceResultType DuckLakeCompaction::GetDataInternal(ExecutionContext &context, 
 // Sink
 //===--------------------------------------------------------------------===//
 unique_ptr<GlobalSinkState> DuckLakeCompaction::GetGlobalSinkState(ClientContext &context) const {
-	return make_uniq<DuckLakeInsertGlobalState>(table);
+	return make_uniq<DuckLakeCompactionSinkState>(table);
 }
 
 SinkResultType DuckLakeCompaction::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
-	auto &global_state = input.global_state.Cast<DuckLakeInsertGlobalState>();
+	auto &global_state = input.global_state.Cast<DuckLakeCompactionSinkState>();
 	DuckLakeInsert::AddWrittenFiles(global_state, chunk, encryption_key, partition_id);
 	return SinkResultType::NEED_MORE_INPUT;
 }
@@ -140,7 +144,7 @@ SinkResultType DuckLakeCompaction::Sink(ExecutionContext &context, DataChunk &ch
 //===--------------------------------------------------------------------===//
 SinkFinalizeType DuckLakeCompaction::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                               OperatorSinkFinalizeInput &input) const {
-	auto &global_state = input.global_state.Cast<DuckLakeInsertGlobalState>();
+	auto &global_state = input.global_state.Cast<DuckLakeCompactionSinkState>();
 
 	if (global_state.written_files.size() > 1) {
 		throw InternalException("DuckLakeCompaction - expected at most a single output file");
@@ -178,6 +182,14 @@ SinkFinalizeType DuckLakeCompaction::Finalize(Pipeline &pipeline, Event &event, 
 
 	auto &transaction = DuckLakeTransaction::Get(context, global_state.table.catalog);
 	transaction.AddCompaction(global_state.table.GetTableId(), std::move(compaction_entry));
+
+	auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+	                                                                        global_state.start_time)
+	                      .count();
+	auto detail = StringUtil::Format("table=%s.%s source_files=%llu files_created=%llu", global_state.table.schema.name,
+	                                 global_state.table.name, source_files.size(), global_state.written_files.size());
+	DUCKDB_LOG(context, DuckLakeCompactionLogType, global_state.table.catalog.GetName(), "file_merge", detail,
+	          elapsed_ms);
 	return SinkFinalizeType::READY;
 }
 
@@ -256,6 +268,8 @@ using compaction_map_t =
 
 void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table,
                                             vector<unique_ptr<LogicalOperator>> &compactions) {
+	auto start_time = std::chrono::steady_clock::now();
+
 	auto &metadata_manager = transaction.GetMetadataManager();
 	auto snapshot = transaction.GetSnapshot();
 
@@ -268,6 +282,28 @@ void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table,
 	// FIXME: pass in the sort_data so that list of files is approximately sorted in the same way
 	// (sorted by the min/max metadata)
 	auto files = metadata_manager.GetFilesForCompaction(table, type, delete_threshold, snapshot, filter_options);
+
+	// Candidate discovery (the metadata query above) and grouping (below) are sequential, not interleaved -
+	// log them as two separate phases so a slow metadata fetch can be told apart from slow in-memory grouping.
+	{
+		auto elapsed_ms =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time)
+		        .count();
+		auto detail =
+		    StringUtil::Format("table=%s.%s files_considered=%llu", table.schema.name, table.name, files.size());
+		DUCKDB_LOG(context, DuckLakeCompactionLogType, catalog.GetName(), "candidate_discovery", detail, elapsed_ms);
+	}
+	auto grouping_start_time = std::chrono::steady_clock::now();
+	// Logs how long grouping (bucketing candidates + batching them into compaction commands) took.
+	// Runs on every exit path (including the REWRITE_DELETES early return below).
+	auto log_grouping = [&]() {
+		auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+		                                                                       grouping_start_time)
+		                      .count();
+		auto detail = StringUtil::Format("table=%s.%s compaction_groups=%llu", table.schema.name, table.name,
+		                                 compactions.size());
+		DUCKDB_LOG(context, DuckLakeCompactionLogType, catalog.GetName(), "grouping", detail, elapsed_ms);
+	};
 
 	// iterate over the files and split into separate compaction groups
 	compaction_map_t<DuckLakeCompactionCandidates> candidates;
@@ -308,6 +344,7 @@ void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table,
 				compactions.push_back(std::move(compaction_command));
 			}
 		}
+		log_grouping();
 		return;
 	}
 	// we have gathered all the candidate files per compaction group
@@ -365,6 +402,7 @@ void DuckLakeCompactor::GenerateCompactions(DuckLakeTableEntry &table,
 			break;
 		}
 	}
+	log_grouping();
 }
 
 unique_ptr<LogicalOperator> DuckLakeCompactor::InsertSort(Binder &binder, unique_ptr<LogicalOperator> &plan,

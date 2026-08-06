@@ -97,6 +97,15 @@ struct DuckLakeCommitContext {
 	DuckLakeSnapshotCommit commit_info;
 	//! When true, Commit() skips the post-commit DropEmptySupersededInlinedTables cleanup.
 	bool skip_drop_empty_inlined = false;
+	//! Reports a failed commit attempt right before backing off and retrying (attempt is 0-indexed,
+	//! sleep_ms is the backoff wait that follows). Used to diagnose stalls caused by commit conflicts,
+	//! e.g. concurrent compaction/write transactions racing on the same table.
+	std::function<void(idx_t attempt, uint64_t sleep_ms, const string &error_message)> log_retry =
+	    [](idx_t, uint64_t, const string &) {
+	};
+	//! Reports successful completion of the commit loop, including time spent on any retries.
+	std::function<void(idx_t attempts, int64_t elapsed_ms)> log_commit_complete = [](idx_t, int64_t) {
+	};
 };
 
 //! Holds the per-transaction mutable change state (new/dropped/renamed catalog entries, local file

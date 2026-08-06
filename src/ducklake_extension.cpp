@@ -20,6 +20,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	auto &instance = loader.GetDatabaseInstance();
 	instance.GetLogManager().RegisterLogType(make_uniq<DuckLakeMetadataLogType>());
+	instance.GetLogManager().RegisterLogType(make_uniq<DuckLakeCompactionLogType>());
 
 	auto &config = DBConfig::GetConfig(instance);
 	StorageExtension::Register(config, "ducklake", make_shared_ptr<DuckLakeStorageExtension>());

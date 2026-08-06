@@ -1458,6 +1458,18 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 		ducklake_catalog.SetCommittedSnapshotId(snapshot_id);
 	};
 	context.commit_info = state->commit_info;
+	context.log_retry = [&](idx_t attempt, uint64_t sleep_ms, const string &error_message) {
+		auto detail = StringUtil::Format("attempt=%llu sleep_ms=%llu error=%s", attempt + 1, sleep_ms, error_message);
+		DUCKDB_LOG(db, DuckLakeCompactionLogType, ducklake_catalog.GetName(), "commit_retry", detail, 0);
+	};
+	context.log_commit_complete = [&](idx_t attempts, int64_t elapsed_ms) {
+		if (attempts == 0) {
+			// no retries were needed - not interesting enough to log
+			return;
+		}
+		auto detail = StringUtil::Format("attempts=%llu", attempts + 1);
+		DUCKDB_LOG(db, DuckLakeCompactionLogType, ducklake_catalog.GetName(), "commit", detail, elapsed_ms);
+	};
 	state->Commit(transaction_snapshot, transaction_changes, retry_config, context);
 }
 
